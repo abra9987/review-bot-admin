@@ -33,6 +33,7 @@ ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
  ADD_USER, REMOVE_USER, LIST_USERS, SELECT_BUSINESS_TYPE, 
  ADD_BUSINESS_TYPE, ADD_QUESTION_FOR_TYPE, EDIT_QUESTION, EDIT_PROMPT) = range(12)
 
+# Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -396,7 +397,7 @@ def business_type_selection_handler(update: Update, context: CallbackContext) ->
     
     if query.data == "add_business_type":
         query.edit_message_text("Введите название нового типа бизнеса:")
-        return ADD_BUSINESS_TYPE
+        return ADD_BUSINESS_TYPE  # Переходим в состояние ADD_BUSINESS_TYPE
     
     elif query.data == "back_to_user_management":
         return show_user_management(update, context)
@@ -427,7 +428,7 @@ def add_business_type_handler(update: Update, context: CallbackContext) -> int:
             f"✅ Тип бизнеса '{business_type}' успешно добавлен со стандартными вопросами.",
             reply_markup=reply_markup
         )
-        return SELECT_BUSINESS_TYPE
+        return SELECT_BUSINESS_TYPE  # Возвращаемся в SELECT_BUSINESS_TYPE
     else:
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_management")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -616,8 +617,6 @@ def edit_question_handler(update: Update, context: CallbackContext) -> int:
         question_id = int(update.message.text.strip())
         context.user_data["edit_question_id"] = question_id
         
-        # Здесь можно добавить проверку существования вопроса с таким ID
-        
         update.message.reply_text("Введите новый текст вопроса:")
         return EDIT_QUESTION
     
@@ -786,6 +785,8 @@ def main():
             SELECT_BUSINESS_TYPE: [
                 CallbackQueryHandler(business_type_selection_handler, pattern="^(add_business_type|back_to_user_management|select_type:.+)$"),
                 CallbackQueryHandler(add_user_for_new_type_handler, pattern="^add_user_for_new_type$"),
+            ],
+            ADD_BUSINESS_TYPE: [
                 MessageHandler(Filters.text & ~Filters.command, add_business_type_handler)
             ],
             ADD_USER: [
