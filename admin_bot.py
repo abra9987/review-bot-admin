@@ -275,6 +275,18 @@ def update_prompt(business_type, new_prompt):
         cur.close()
         release_connection(conn)
 
+# --- Обработчик ошибок ---
+def error_handler(update: Update, context: CallbackContext) -> None:
+    """Обрабатывает ошибки, возникающие в боте."""
+    logger.error(f"Произошла ошибка: {context.error}")
+    if isinstance(context.error, telegram.error.Conflict):
+        logger.error("Конфликт: другой экземпляр бота уже запущен.")
+        if update:
+            update.message.reply_text("Произошла ошибка: бот уже запущен в другом месте. Перезапустите бота.")
+    else:
+        if update:
+            update.message.reply_text("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
 # --- Обработчики команд ---
 def start(update: Update, context: CallbackContext) -> int:
     """Начало разговора и проверка прав администратора."""
@@ -716,6 +728,9 @@ def main():
         updater = Updater(ADMIN_BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
 
+        # Добавляем обработчик ошибок
+        dp.add_error_handler(error_handler)
+
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
             states={
@@ -763,13 +778,14 @@ def main():
                     MessageHandler(Filters.text & ~Filters.command, edit_prompt_handler)
                 ],
             },
-            fallbacks=[CommandHandler("cancel", cancel)]
+            fallbacks=[CommandHandler("cancel", cancel)],
+            per_message=True  # Устанавливаем per_message=True для корректной обработки callback-запросов
         )
 
         dp.add_handler(conv_handler)
         
         logger.info("Бот запущен")
-        updater.start_polling()
+        updater.start_polling(timeout=30)  # Увеличиваем таймаут для стабильности
         updater.idle()
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
