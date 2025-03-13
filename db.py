@@ -2,8 +2,14 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env файла
+# Загружаем переменные окружения
 load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_connection():
+    """Возвращает соединение с базой данных."""
+    return psycopg2.connect(DATABASE_URL)
 
 # Параметры подключения к базе данных из переменных окружения
 DB_HOST = os.getenv("DB_HOST")
