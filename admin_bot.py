@@ -1047,7 +1047,7 @@ def main():
                     MessageHandler(Filters.text & ~Filters.command, edit_prompt_handler)
                 ],
                 EDIT_USER_INFO: [
-                    CallbackQueryHandler(edit_user_selection_handler, pattern="^edit_user:[0-9]+$"),
+                    CallbackQueryHandler(edit_user_info_handler, pattern="^edit_user:[0-9]+$"),
                     CallbackQueryHandler(edit_user_info_selection_handler, pattern="^(edit_username|edit_comment|back_to_user_select|back_to_user_list)$"),
                     CallbackQueryHandler(cancel_edit_handler, pattern="^cancel_edit$")
                 ],
