@@ -32,7 +32,8 @@ ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 # Определяем состояния диалога
 (MAIN_MENU, MANAGE_USERS, MANAGE_QUESTIONS, MANAGE_PROMPTS, 
  ADD_USER, REMOVE_USER, LIST_USERS, SELECT_BUSINESS_TYPE, 
- ADD_BUSINESS_TYPE, ADD_QUESTION_FOR_TYPE, EDIT_QUESTION, EDIT_PROMPT) = range(12)
+ ADD_BUSINESS_TYPE, ADD_QUESTION_FOR_TYPE, EDIT_QUESTION, EDIT_PROMPT,
+ EDIT_USER_INFO, ADD_USERNAME, ADD_COMMENT) = range(15)  # Добавили 3 новых состояния
 
 # Настройка логирования
 logging.basicConfig(
@@ -58,6 +59,26 @@ def get_connection():
     except Exception as e:
         logger.error(f"Ошибка при получении соединения из пула: {e}")
         raise
+
+def init_database():
+    """Инициализирует базу данных, добавляя необходимые колонки."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        # Добавляем новые колонки в таблицу users
+        cur.execute("""
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS username TEXT,
+        ADD COLUMN IF NOT EXISTS comment TEXT;
+        """)
+        conn.commit()
+        logger.info("База данных успешно обновлена.")
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении базы данных: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        release_connection(conn)
 
 def release_connection(conn):
     """Возвращает соединение в пул."""
@@ -95,8 +116,15 @@ def get_users_by_business_type(business_type):
     conn = get_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT telegram_id FROM users WHERE business_type = %s", (business_type,))
-        users = [row[0] for row in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT telegram_id, username, comment 
+            FROM users 
+            WHERE business_type = %s
+            """, 
+            (business_type,)
+        )
+        users = [(row[0], row[1], row[2]) for row in cur.fetchall()]
         logger.info(f"Получено {len(users)} пользователей для типа бизнеса '{business_type}'")
         return users
     except Exception as e:
@@ -106,14 +134,78 @@ def get_users_by_business_type(business_type):
         cur.close()
         release_connection(conn)
 
-def add_user(telegram_id, business_type):
+def update_user_info(telegram_id, username=None, comment=None):
+    """Обновляет информацию о пользователе (имя и/или комментарий)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        update_fields = []
+        params = []
+        
+        if username is not None:
+            update_fields.append("username = %s")
+            params.append(username)
+        
+        if comment is not None:
+            update_fields.append("comment = %s")
+            params.append(comment)
+        
+        if not update_fields:
+            return False  # Нечего обновлять
+        
+        query = f"UPDATE users SET {', '.join(update_fields)} WHERE telegram_id = %s"
+        params.append(telegram_id)
+        
+        cur.execute(query, params)
+        updated = cur.rowcount > 0
+        conn.commit()
+        
+        if updated:
+            logger.info(f"Информация пользователя {telegram_id} успешно обновлена")
+        else:
+            logger.info(f"Пользователь {telegram_id} не найден для обновления")
+        return updated
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении информации пользователя {telegram_id}: {e}")
+        conn.rollback()
+        return False
+    finally:
+        cur.close()
+        release_connection(conn)
+
+def get_user_info(telegram_id):
+    """Получает информацию о пользователе."""
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT business_type, username, comment FROM users WHERE telegram_id = %s", 
+            (telegram_id,)
+        )
+        result = cur.fetchone()
+        return result if result else None
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации о пользователе {telegram_id}: {e}")
+        return None
+    finally:
+        cur.close()
+        release_connection(conn)
+
+def add_user(telegram_id, business_type, username=None, comment=None):
     """Добавляет нового пользователя в базу данных."""
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(
-            "INSERT INTO users (telegram_id, business_type) VALUES (%s, %s) ON CONFLICT (telegram_id) DO UPDATE SET business_type = %s",
-            (telegram_id, business_type, business_type)
+            """
+            INSERT INTO users (telegram_id, business_type, username, comment) 
+            VALUES (%s, %s, %s, %s) 
+            ON CONFLICT (telegram_id) DO UPDATE 
+            SET business_type = %s, 
+                username = COALESCE(%s, users.username), 
+                comment = COALESCE(%s, users.comment)
+            """,
+            (telegram_id, business_type, username, comment, business_type, username, comment)
         )
         conn.commit()
         logger.info(f"Пользователь {telegram_id} успешно добавлен с типом бизнеса '{business_type}'")
@@ -376,14 +468,29 @@ def show_user_list(update: Update, context: CallbackContext) -> int:
         update.callback_query.edit_message_text("Нет зарегистрированных пользователей.", reply_markup=reply_markup)
         logger.info("Нет зарегистрированных пользователей")
         return LIST_USERS
+    
     message_text = "📋 Список пользователей по типам бизнеса:\n\n"
     for btype in business_types:
         users = get_users_by_business_type(btype)
         message_text += f"📌 {btype} ({len(users)} пользователей):\n"
-        for user_id in users:
-            message_text += f"   - ID: {user_id}\n"
+        for user_id, username, comment in users:
+            # Форматируем отображение пользователя
+            user_info = f"   - ID: {user_id}"
+            if username or comment:
+                # Добавляем имя и/или комментарий в скобках
+                info_parts = []
+                if username:
+                    info_parts.append(username)
+                if comment:
+                    info_parts.append(comment)
+                user_info += f" ({', '.join(info_parts)})"
+            message_text += f"{user_info}\n"
         message_text += "\n"
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_management")]]
+    
+    keyboard = [
+        [InlineKeyboardButton("✏️ Добавить/изменить имя или комментарий", callback_data="edit_user_info")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_management")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.callback_query.edit_message_text(message_text, reply_markup=reply_markup)
     logger.info("Отображен список пользователей")
@@ -446,17 +553,28 @@ def add_user_for_new_type_handler(update: Update, context: CallbackContext) -> i
 def add_user_handler(update: Update, context: CallbackContext) -> int:
     """Обрабатывает добавление нового пользователя."""
     try:
-        telegram_id = int(update.message.text.strip())
+        # Проверяем, содержит ли ввод дополнительную информацию после ID
+        input_text = update.message.text.strip()
+        parts = input_text.split(maxsplit=1)
+        
+        telegram_id = int(parts[0])
+        username = parts[1] if len(parts) > 1 else None
+        
         business_type = context.user_data.get("selected_business_type")
-        logger.info(f"Попытка добавить пользователя {telegram_id} с типом бизнеса '{business_type}'")
-        if add_user(telegram_id, business_type):
-            update.message.reply_text(f"✅ Пользователь с ID {telegram_id} успешно добавлен к типу бизнеса '{business_type}'.")
+        logger.info(f"Попытка добавить пользователя {telegram_id} с типом бизнеса '{business_type}', имя: {username}")
+        
+        if add_user(telegram_id, business_type, username):
+            if username:
+                update.message.reply_text(f"✅ Пользователь с ID {telegram_id} и именем '{username}' успешно добавлен к типу бизнеса '{business_type}'.")
+            else:
+                update.message.reply_text(f"✅ Пользователь с ID {telegram_id} успешно добавлен к типу бизнеса '{business_type}'.")
         else:
             update.message.reply_text("❌ Не удалось добавить пользователя. Пожалуйста, попробуйте еще раз.")
             logger.error(f"Не удалось добавить пользователя {telegram_id}")
     except ValueError:
         update.message.reply_text("❌ Ошибка: Telegram ID должен быть числом. Пожалуйста, попробуйте еще раз.")
         logger.error("Введен некорректный Telegram ID")
+    
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_management")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
@@ -484,9 +602,99 @@ def user_list_handler(update: Update, context: CallbackContext) -> int:
     """Обрабатывает выбор в списке пользователей."""
     query = update.callback_query
     query.answer()
+    logger.info(f"Обработка выбора в списке пользователей: {query.data}")
+    
     if query.data == "back_to_user_management":
-        logger.info("Возврат к меню управления пользователями")
         return show_user_management(update, context)
+    elif query.data == "edit_user_info":
+        query.edit_message_text("Введите Telegram ID пользователя, для которого хотите добавить/изменить имя или комментарий:")
+        return EDIT_USER_INFO
+    
+    return LIST_USERS
+
+def edit_user_info_handler(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает ввод ID пользователя для редактирования информации."""
+    try:
+        telegram_id = int(update.message.text.strip())
+        user_info = get_user_info(telegram_id)
+        
+        if user_info:
+            business_type, username, comment = user_info
+            context.user_data["edit_user_id"] = telegram_id
+            
+            message_text = f"Информация о пользователе ID: {telegram_id}\n"
+            message_text += f"Тип бизнеса: {business_type}\n"
+            message_text += f"Имя: {username or 'Не указано'}\n"
+            message_text += f"Комментарий: {comment or 'Не указан'}\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("✏️ Изменить имя", callback_data="edit_username")],
+                [InlineKeyboardButton("📝 Изменить комментарий", callback_data="edit_comment")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            update.message.reply_text(message_text, reply_markup=reply_markup)
+            logger.info(f"Отображена информация о пользователе {telegram_id}")
+            return EDIT_USER_INFO
+        else:
+            update.message.reply_text(f"❌ Пользователь с ID {telegram_id} не найден.")
+            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+            return LIST_USERS
+    except ValueError:
+        update.message.reply_text("❌ Ошибка: Telegram ID должен быть числом. Пожалуйста, попробуйте еще раз.")
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+        return LIST_USERS
+
+def edit_user_info_selection_handler(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает выбор действия с информацией пользователя."""
+    query = update.callback_query
+    query.answer()
+    logger.info(f"Обработка выбора действия с информацией пользователя: {query.data}")
+    
+    if query.data == "edit_username":
+        query.edit_message_text("Введите новое имя пользователя:")
+        return ADD_USERNAME
+    elif query.data == "edit_comment":
+        query.edit_message_text("Введите новый комментарий для пользователя:")
+        return ADD_COMMENT
+    elif query.data == "back_to_user_list":
+        # Возвращаемся к списку пользователей через кнопку
+        return show_user_list(update, context)
+    
+    return EDIT_USER_INFO
+
+def add_username_handler(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает ввод имени пользователя."""
+    username = update.message.text.strip()
+    telegram_id = context.user_data.get("edit_user_id")
+    
+    if update_user_info(telegram_id, username=username):
+        update.message.reply_text(f"✅ Имя пользователя с ID {telegram_id} успешно обновлено.")
+    else:
+        update.message.reply_text(f"❌ Не удалось обновить имя пользователя. Пожалуйста, попробуйте еще раз.")
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад к списку пользователей", callback_data="back_to_user_list")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
+    return LIST_USERS
+
+def add_comment_handler(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает ввод комментария для пользователя."""
+    comment = update.message.text.strip()
+    telegram_id = context.user_data.get("edit_user_id")
+    
+    if update_user_info(telegram_id, comment=comment):
+        update.message.reply_text(f"✅ Комментарий для пользователя с ID {telegram_id} успешно обновлен.")
+    else:
+        update.message.reply_text(f"❌ Не удалось обновить комментарий. Пожалуйста, попробуйте еще раз.")
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад к списку пользователей", callback_data="back_to_user_list")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
     return LIST_USERS
 
 # --- Управление вопросами ---
@@ -713,6 +921,7 @@ def cancel(update: Update, context: CallbackContext) -> int:
 def main():
     """Основная функция для запуска бота."""
     try:
+        init_database()
         updater = Updater(ADMIN_BOT_TOKEN, use_context=True)
         dp = updater.dispatcher
 
@@ -741,7 +950,8 @@ def main():
                     MessageHandler(Filters.text & ~Filters.command, remove_user_handler)
                 ],
                 LIST_USERS: [
-                    CallbackQueryHandler(user_list_handler, pattern="^back_to_user_management$")
+                    CallbackQueryHandler(user_list_handler, pattern="^(back_to_user_management|edit_user_info)$"),
+                    CallbackQueryHandler(show_user_list, pattern="^back_to_user_list$")
                 ],
                 MANAGE_QUESTIONS: [
                     CallbackQueryHandler(question_management_handler, pattern="^(back_to_main|question_type:.+)$"),
@@ -761,6 +971,17 @@ def main():
                 ],
                 EDIT_PROMPT: [
                     MessageHandler(Filters.text & ~Filters.command, edit_prompt_handler)
+                ],
+                # Вот новые состояния, которые нужно добавить:
+                EDIT_USER_INFO: [
+                    MessageHandler(Filters.text & ~Filters.command, edit_user_info_handler),
+                    CallbackQueryHandler(edit_user_info_selection_handler, pattern="^(edit_username|edit_comment|back_to_user_list)$")
+                ],
+                ADD_USERNAME: [
+                    MessageHandler(Filters.text & ~Filters.command, add_username_handler)
+                ],
+                ADD_COMMENT: [
+                    MessageHandler(Filters.text & ~Filters.command, add_comment_handler)
                 ],
             },
             fallbacks=[CommandHandler("cancel", cancel)]
