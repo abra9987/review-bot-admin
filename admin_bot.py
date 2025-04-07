@@ -470,12 +470,16 @@ def show_user_list(update: Update, context: CallbackContext) -> int:
         return LIST_USERS
     
     message_text = "📋 Список пользователей по типам бизнеса:\n\n"
+    all_users = []  # Список для хранения всех пользователей для кнопок
+    
     for btype in business_types:
         users = get_users_by_business_type(btype)
         message_text += f"📌 {btype} ({len(users)} пользователей):\n"
         for user_id, username, comment in users:
             # Форматируем отображение пользователя
             user_info = f"   - ID: {user_id}"
+            display_name = username or f"ID:{user_id}"
+            
             if username or comment:
                 # Добавляем имя и/или комментарий в скобках
                 info_parts = []
@@ -484,11 +488,17 @@ def show_user_list(update: Update, context: CallbackContext) -> int:
                 if comment:
                     info_parts.append(comment)
                 user_info += f" ({', '.join(info_parts)})"
+            
             message_text += f"{user_info}\n"
+            all_users.append((user_id, display_name))
+        
         message_text += "\n"
     
+    # Сохраняем список пользователей в контексте для использования в кнопках
+    context.user_data["all_users"] = all_users
+    
     keyboard = [
-        [InlineKeyboardButton("✏️ Добавить/изменить имя или комментарий", callback_data="edit_user_info")],
+        [InlineKeyboardButton("✏️ Добавить/изменить имя или комментарий", callback_data="select_user_to_edit")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_management")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -606,23 +616,51 @@ def user_list_handler(update: Update, context: CallbackContext) -> int:
     
     if query.data == "back_to_user_management":
         return show_user_management(update, context)
-    elif query.data == "edit_user_info":
-        query.edit_message_text("Введите Telegram ID пользователя, для которого хотите добавить/изменить имя или комментарий:")
-        return EDIT_USER_INFO
+    elif query.data == "select_user_to_edit":
+        return show_user_selection(update, context)
     
     return LIST_USERS
 
+def show_user_selection(update: Update, context: CallbackContext) -> int:
+    """Показывает список пользователей для выбора."""
+    all_users = context.user_data.get("all_users", [])
+    
+    if not all_users:
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        update.callback_query.edit_message_text("Нет доступных пользователей для редактирования.", reply_markup=reply_markup)
+        return LIST_USERS
+    
+    # Создаем кнопки для выбора пользователя
+    keyboard = []
+    for user_id, display_name in all_users:
+        keyboard.append([InlineKeyboardButton(f"{display_name}", callback_data=f"edit_user:{user_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.callback_query.edit_message_text("Выберите пользователя для редактирования:", reply_markup=reply_markup)
+    logger.info("Отображен список пользователей для выбора")
+    return EDIT_USER_INFO
+
 def edit_user_info_handler(update: Update, context: CallbackContext) -> int:
-    """Обрабатывает ввод ID пользователя для редактирования информации."""
-    try:
-        telegram_id = int(update.message.text.strip())
-        user_info = get_user_info(telegram_id)
+    """Обрабатывает выбор пользователя для редактирования."""
+    query = update.callback_query
+    query.answer()
+    
+    if query.data == "back_to_user_list":
+        return show_user_list(update, context)
+    
+    if query.data.startswith("edit_user:"):
+        user_id = int(query.data.split(":", 1)[1])
+        context.user_data["edit_user_id"] = user_id
+        
+        user_info = get_user_info(user_id)
         
         if user_info:
             business_type, username, comment = user_info
-            context.user_data["edit_user_id"] = telegram_id
             
-            message_text = f"Информация о пользователе ID: {telegram_id}\n"
+            message_text = f"Информация о пользователе ID: {user_id}\n"
             message_text += f"Тип бизнеса: {business_type}\n"
             message_text += f"Имя: {username or 'Не указано'}\n"
             message_text += f"Комментарий: {comment or 'Не указан'}\n"
@@ -630,24 +668,14 @@ def edit_user_info_handler(update: Update, context: CallbackContext) -> int:
             keyboard = [
                 [InlineKeyboardButton("✏️ Изменить имя", callback_data="edit_username")],
                 [InlineKeyboardButton("📝 Изменить комментарий", callback_data="edit_comment")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]
+                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_select")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text(message_text, reply_markup=reply_markup)
-            logger.info(f"Отображена информация о пользователе {telegram_id}")
+            query.edit_message_text(message_text, reply_markup=reply_markup)
+            logger.info(f"Отображена информация о пользователе {user_id}")
             return EDIT_USER_INFO
-        else:
-            update.message.reply_text(f"❌ Пользователь с ID {telegram_id} не найден.")
-            keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
-            return LIST_USERS
-    except ValueError:
-        update.message.reply_text("❌ Ошибка: Telegram ID должен быть числом. Пожалуйста, попробуйте еще раз.")
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_list")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text("Выберите действие:", reply_markup=reply_markup)
-        return LIST_USERS
+    
+    return EDIT_USER_INFO
 
 def edit_user_info_selection_handler(update: Update, context: CallbackContext) -> int:
     """Обрабатывает выбор действия с информацией пользователя."""
@@ -656,19 +684,58 @@ def edit_user_info_selection_handler(update: Update, context: CallbackContext) -
     logger.info(f"Обработка выбора действия с информацией пользователя: {query.data}")
     
     if query.data == "edit_username":
-        query.edit_message_text("Введите новое имя пользователя:")
+        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="cancel_edit")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text("Введите новое имя пользователя:", reply_markup=reply_markup)
         return ADD_USERNAME
     elif query.data == "edit_comment":
-        query.edit_message_text("Введите новый комментарий для пользователя:")
+        keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="cancel_edit")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text("Введите новый комментарий для пользователя:", reply_markup=reply_markup)
         return ADD_COMMENT
+    elif query.data == "back_to_user_select":
+        return show_user_selection(update, context)
     elif query.data == "back_to_user_list":
-        # Возвращаемся к списку пользователей через кнопку
         return show_user_list(update, context)
     
     return EDIT_USER_INFO
 
+def cancel_edit_handler(update: Update, context: CallbackContext) -> int:
+    """Обрабатывает отмену редактирования."""
+    query = update.callback_query
+    query.answer()
+    
+    user_id = context.user_data.get("edit_user_id")
+    user_info = get_user_info(user_id)
+    
+    if user_info:
+        business_type, username, comment = user_info
+        
+        message_text = f"Информация о пользователе ID: {user_id}\n"
+        message_text += f"Тип бизнеса: {business_type}\n"
+        message_text += f"Имя: {username or 'Не указано'}\n"
+        message_text += f"Комментарий: {comment or 'Не указан'}\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Изменить имя", callback_data="edit_username")],
+            [InlineKeyboardButton("📝 Изменить комментарий", callback_data="edit_comment")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_user_select")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text(message_text, reply_markup=reply_markup)
+        return EDIT_USER_INFO
+    
+    return show_user_selection(update, context)
+
 def add_username_handler(update: Update, context: CallbackContext) -> int:
     """Обрабатывает ввод имени пользователя."""
+    # Проверяем, не пришел ли callback для отмены
+    if update.callback_query:
+        query = update.callback_query
+        query.answer()
+        if query.data == "cancel_edit":
+            return cancel_edit_handler(update, context)
+    
     username = update.message.text.strip()
     telegram_id = context.user_data.get("edit_user_id")
     
@@ -684,6 +751,13 @@ def add_username_handler(update: Update, context: CallbackContext) -> int:
 
 def add_comment_handler(update: Update, context: CallbackContext) -> int:
     """Обрабатывает ввод комментария для пользователя."""
+    # Проверяем, не пришел ли callback для отмены
+    if update.callback_query:
+        query = update.callback_query
+        query.answer()
+        if query.data == "cancel_edit":
+            return cancel_edit_handler(update, context)
+    
     comment = update.message.text.strip()
     telegram_id = context.user_data.get("edit_user_id")
     
@@ -950,7 +1024,7 @@ def main():
                     MessageHandler(Filters.text & ~Filters.command, remove_user_handler)
                 ],
                 LIST_USERS: [
-                    CallbackQueryHandler(user_list_handler, pattern="^(back_to_user_management|edit_user_info)$"),
+                    CallbackQueryHandler(user_list_handler, pattern="^(back_to_user_management|select_user_to_edit)$"),
                     CallbackQueryHandler(show_user_list, pattern="^back_to_user_list$")
                 ],
                 MANAGE_QUESTIONS: [
@@ -972,16 +1046,18 @@ def main():
                 EDIT_PROMPT: [
                     MessageHandler(Filters.text & ~Filters.command, edit_prompt_handler)
                 ],
-                # Вот новые состояния, которые нужно добавить:
                 EDIT_USER_INFO: [
-                    MessageHandler(Filters.text & ~Filters.command, edit_user_info_handler),
-                    CallbackQueryHandler(edit_user_info_selection_handler, pattern="^(edit_username|edit_comment|back_to_user_list)$")
+                    CallbackQueryHandler(edit_user_selection_handler, pattern="^edit_user:[0-9]+$"),
+                    CallbackQueryHandler(edit_user_info_selection_handler, pattern="^(edit_username|edit_comment|back_to_user_select|back_to_user_list)$"),
+                    CallbackQueryHandler(cancel_edit_handler, pattern="^cancel_edit$")
                 ],
                 ADD_USERNAME: [
-                    MessageHandler(Filters.text & ~Filters.command, add_username_handler)
+                    MessageHandler(Filters.text & ~Filters.command, add_username_handler),
+                    CallbackQueryHandler(cancel_edit_handler, pattern="^cancel_edit$")
                 ],
                 ADD_COMMENT: [
-                    MessageHandler(Filters.text & ~Filters.command, add_comment_handler)
+                    MessageHandler(Filters.text & ~Filters.command, add_comment_handler),
+                    CallbackQueryHandler(cancel_edit_handler, pattern="^cancel_edit$")
                 ],
             },
             fallbacks=[CommandHandler("cancel", cancel)]
